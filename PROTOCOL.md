@@ -2,8 +2,8 @@
 
 Everything here was observed on one stove (STOVEItaly / Vivace pellet stove, Wi-Fi
 module firmware recent enough to expose the HTTP API). Offsets are 0-based.
-"Verified" means checked against our own data. "From the app" means read in the
-decompiled VivaceTheStove 1.12.1 code but not exercised on our stove.
+"Verified" means checked against captured data. "From the app" means read in the
+decompiled VivaceTheStove 1.12.1 code but not exercised on a stove.
 
 ## Transport
 
@@ -33,7 +33,7 @@ Only the first `data[2] + 5` values are the frame. The rest is buffer and usuall
 
 The app also knows `/getBeaconTemp`, `/getBeaconMacAddress`, `/getBeaconOffset` and
 `/beaconOffset?beaconOffset=<n>`. These are for an optional wireless room-temperature
-probe. We have no probe and didn't touch them.
+probe. Not tested (no probe available).
 
 ## Frame layout
 
@@ -68,7 +68,7 @@ def crc16_modbus(data):
   frames CRC-B is constant for a given header, because CRC-A cancels the payload out.
   It's `223,183` for status frames and `68,203` for settings frames.
 
-Verified on 58,447 distinct status frames and every settings frame we recorded.
+Verified on 58,447 distinct status frames and every recorded settings frame.
 The app's own `calcCRC` is the same function.
 
 On **command** frames there is no CRC-A. Bytes 167-168 hold the fixed value `132,12`
@@ -79,13 +79,13 @@ changing between commands.
 
 | Offset | Meaning | Notes |
 |---|---|---|
-| 5-7 | counter, seconds | 24-bit LE. Not an uptime we could match to anything. |
+| 5-7 | counter, seconds | 24-bit LE. Doesn't match any known uptime. |
 | 9 | on/off as commanded | Flips within a poll of the command, even while the stove is still hot. It isn't "flame burning". |
 | 10 | program | 0 off, 1 on, 2 external thermostat |
 | 11 | room fan setting | 1-5 |
 | 12-13 | set point ×10 | 16-bit LE. Verified: 25.7 °C reads as `1,1`. |
 | 20 | auto-off | 0/1 |
-| 26 | error code | Always 0 on our stove so far. See the table below. |
+| 26 | error code | Always 0 so far on the test stove. See the table below. |
 | 34-35 | room temperature ×10 | 16-bit LE. 25.5 °C reads as `255,0`, so only `255,255` means "no value". |
 | 38 | structure temperature, °C | |
 | 42-43 | smoke temperature, °C | 16-bit LE, goes above 255 °C at full power |
@@ -101,7 +101,7 @@ changing between commands.
 | 114-115 | CRC-A | |
 | 116-117 | CRC-B | |
 
-Some community configs call bytes 54-55 "flow temperature". On our stove they follow
+Some community configs call bytes 54-55 "flow temperature". On the test stove they follow
 the smoke fan, with a correlation of 0.86 over about 58k samples: about 40 when off,
 90 at power 1, 130 at power 5, 250-350 during the ignition blast. The igniter switching
 on doesn't move the value. The smoke fan starting does, within the same 15 s poll.
@@ -123,7 +123,7 @@ So it reads like an air-flow sensor, in raw units.
 
 Schedule slot for day `d` (0 = Monday) and slot `s` (0-2) starts at `41 + 18*d + 6*s`:
 `start hour, start min, stop hour, stop min, temp lo, temp hi` (temp ×10, LE). An
-unused slot is six `255` bytes. This is from the app; our schedule is empty.
+unused slot is six `255` bytes. This is from the app; the test stove had an empty schedule.
 
 ### Writing
 
@@ -141,7 +141,7 @@ GET /serialflush?str=050,000,166,000,001,000,001,220,000,000,008,220,000,000,008
 ```
 
 The commas are sent URL-encoded as `%2C`. That's what the app does, and the only form
-we tested. The module answers
+tested. The module answers
 `200` with an empty body. The stove applies the change in 3-6 s. Re-read `byte=49`
 to confirm.
 
@@ -150,23 +150,23 @@ patches it. So **always build a command from a fresh read**. Every byte you don'
 touch gets written back, including on/off. A stale copy can switch the stove on or
 off, or bring back an old schedule.
 
-Example from our stove, set point 21.5 -> 22.0 °C. The full frames are in `samples/`.
+Example from the test stove, set point 21.5 -> 22.0 °C. The full frames are in `samples/`.
 
 ```
 read  49,0,166,0,1,0,1,215,0,0,8,215,0,0,8,10,0,0,8,0,2,1,0,255, ... ,255,116,171,68,203
 write 50,0,166,0,1,0,1,220,0,0,8,220,0,0,8,10,0,0,8,0,2,1,0,255, ... ,255,132,12,194,93
 ```
 
-We diffed the settings frame before and after this command. Only bytes 7 and 11
-changed, plus the CRC-A the stove recomputed.
+A diff of the settings frame before and after this command shows that only bytes 7
+and 11 changed, plus the CRC-A the stove recomputed.
 
 The app has a second layout for stoves configured as "version 1": len 95, bytes 1 and
-3 = 1, CRC over 0-353, 356 bytes sent, schedule at `72 + 40*d + 8*s`. Untested, since
-we don't have one.
+3 = 1, CRC over 0-353, 356 bytes sent, schedule at `72 + 40*d + 8*s`. Untested (no such
+stove available).
 
 ## Error codes
 
-From the HACF thread. Not verified, because our stove never reported an error.
+From the HACF thread. Not verified: the test stove never reported an error.
 
 | Code | Meaning |
 |---|---|
