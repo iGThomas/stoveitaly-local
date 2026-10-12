@@ -12,7 +12,8 @@ Each command:
   6. logs the result to stove_log/events.jsonl (event "command").
 The HA call returns immediately ("queued"); a detached worker does steps 1-6.
 If several requests for the same field queue up, only the newest is sent.
-Power commands are limited to one every 2 minutes (protects the igniter).
+Power commands are limited to one every 2 minutes (protects the igniter); a request made
+during the cooldown is sent when it ends.
 "python3 stove_control.py --last" prints the newest command result as JSON.
 """
 import fcntl
@@ -138,6 +139,10 @@ def queue(action, value):
 
 
 def worker(field, seq):
+    if field == "power":
+        # wait out the power cooldown (outside the lock, so temp/fan commands aren't blocked);
+        # if a newer power request arrives meanwhile, its own worker takes over
+        time.sleep(max(0.0, POWER_COOLDOWN - (time.time() - last_power_sent())))
     with open(LOCK_FILE, "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
@@ -155,9 +160,9 @@ def worker(field, seq):
             target = apply(current, action, value)
             if confirmed(current, target):
                 entry["result"] = "already set"
-            elif field == "power" and time.time() - last_power_sent() < POWER_COOLDOWN:
-                wait = int(POWER_COOLDOWN - (time.time() - last_power_sent()))
-                entry["result"] = f"refused: wait {wait} s between power changes"
+            elif field == "power" and time.time() - last_power_sent() < POWER_COOLDOWN - 1:
+                # only possible if two power workers raced past the sleep; the newest one wins later
+                entry["result"] = "skipped: power cooldown"
             else:
                 if field == "power":
                     with open(state_path("last_power_sent"), "w") as f:
