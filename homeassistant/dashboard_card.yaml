@@ -1,0 +1,57 @@
+# Dashboard card for the vivace_stove package.
+# Dashboard -> edit -> add card -> Manual, paste this.
+type: vertical-stack
+cards:
+  - type: heading
+    heading: Stove
+    icon: mdi:fireplace
+  - type: tile
+    entity: input_boolean.stove_power
+    name: Power
+    icon: mdi:fireplace
+    tap_action:
+      action: toggle
+      confirmation:
+        text: Switch the stove on/off? (max once every 2 minutes)
+    icon_tap_action:
+      action: toggle
+      confirmation:
+        text: Switch the stove on/off? (max once every 2 minutes)
+  - type: tile
+    entity: input_number.stove_target_temperature
+    name: Target temperature
+    features:
+      - type: numeric-input
+        style: buttons
+  - type: tile
+    entity: input_number.stove_fan_speed
+    name: Fan speed
+    features:
+      - type: numeric-input
+        style: buttons
+  - type: tile
+    entity: sensor.stove_last_command
+    name: Last command
+  - type: entities
+    entities:
+      - entity: sensor.pellet_active_label
+        name: State
+      - entity: sensor.pellet_room_temp
+        name: Room
+      - entity: sensor.pellet_smoke_temp
+        name: Smoke
+      - entity: sensor.pellet_level_bars
+        name: Pellets
+      - entity: sensor.pellet_error
+        name: Error
+      - entity: binary_sensor.pellet_igniter
+        name: Igniter
+      - entity: sensor.pellet_burn_time
+        name: Burning for
+  - type: history-graph
+    hours_to_show: 6
+    entities:
+      - entity: sensor.pellet_room_temp
+        name: Room
+      - entity: sensor.pellet_set_temp
+        name: Set point

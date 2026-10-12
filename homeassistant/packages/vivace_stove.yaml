@@ -1,0 +1,522 @@
+# Vivace / STOVEItaly pellet stove - Home Assistant package
+#
+# Put this file in <config>/packages/ and enable packages in configuration.yaml:
+#
+#   homeassistant:
+#     packages: !include_dir_named packages
+#
+# Also copy stove_control.py and stove_logger.py to <config>/ (next to
+# configuration.yaml). Replace 192.168.1.50 below and in stove_control.py with
+# the IP address of your stove's Wi-Fi module.
+
+# Stove target temperature: what you set on the dashboard. An automation sends it
+# to the stove 2 s after the last change, and follows changes made on the stove itself.
+input_number:
+  stove_target_temperature:
+    name: Stove target temperature
+    icon: mdi:thermometer
+    unit_of_measurement: "°C"
+    min: 5
+    max: 35
+    step: 0.1
+    mode: box
+  stove_fan_speed:
+    name: Stove fan speed
+    icon: mdi:fan
+    min: 1
+    max: 5
+    step: 1
+    mode: box
+
+# Stove power request from the dashboard (sent 3 s after the change, max one power
+# command every 2 min; follows the stove's real state otherwise)
+input_boolean:
+  stove_power:
+    name: Stove power
+    icon: mdi:fireplace
+
+# Result of the newest stove command (from /config/stove_log/events.jsonl)
+command_line:
+  - sensor:
+      name: Stove last command
+      unique_id: stove_last_command
+      icon: mdi:console-line
+      command: "python3 /config/stove_control.py --last"
+      scan_interval: 10
+      json_attributes:
+        - action
+        - value
+        - result
+        - ts
+      value_template: >-
+        {% set a = {'temp': 'Temperature', 'fan': 'Fan', 'on': 'Power on', 'off': 'Power off'} %}
+        {% if value_json.action %}{{ (a.get(value_json.action, value_json.action) ~ ' ' ~ (value_json.value or '') ~ ' → ' ~ value_json.result ~ ' (' ~ value_json.ts[11:16] ~ ')')[:250] }}{% else %}none yet{% endif %}
+
+# Stove event logger -> /config/stove_log/events.jsonl (capped at 10 MB)
+shell_command:
+  stove_log: "python3 /config/stove_logger.py {{ f81 }} {{ f49 }}"
+  # Stove control: reads fresh settings, changes one field, sends, waits for confirmation
+  stove_control: "python3 /config/stove_control.py {{ action }} {{ value | default('') }}"
+
+rest:
+  - resource: "http://192.168.1.50/read?byte=81"
+    scan_interval: 15
+    sensor:
+      - name: pellet_frame_81
+        # small numeric state so HA accepts it
+        value_template: "{{ value_json.data | length }}"
+        json_attributes:
+          - data
+
+  - resource: "http://192.168.1.50/read?byte=49"
+    scan_interval: 60
+    sensor:
+      - name: pellet_frame_49
+        value_template: "{{ value_json.data | length }}"
+        json_attributes:
+          - data
+
+template:
+  - sensor:
+      # --------------------------
+      # helper: pull & parse frame 81
+      # --------------------------
+      - name: pellet_room_temp
+        unit_of_measurement: "°C"
+        state_class: measurement
+        device_class: temperature
+        state: >
+          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% if raw %}
+            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {# Ambient = 16-bit little-endian (b[35]*256 + b[34]) / 10 #}
+            {# only 255,255 means "no value"; a single 255 is valid (e.g. 25.5 °C) #}
+            {% if b|length > 35 and not (b[34] == 255 and b[35] == 255) %}
+              {{ ((b[35] * 256 + b[34]) / 10) | round(1) }}
+            {% else %}{{ none }}{% endif %}
+          {% else %}{{ none }}{% endif %}
+
+      - name: pellet_set_temp
+        unit_of_measurement: "°C"
+        state_class: measurement
+        device_class: temperature
+        state: >
+          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% if raw %}
+            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {# 16-bit little-endian ÷10 (verified: 25.7 °C = b12 1, b13 1) #}
+            {% if b|length > 13 and not (b[12] == 255 and b[13] == 255) %}
+              {{ ((b[13] * 256 + b[12]) / 10) | round(1) }}
+            {% else %}{{ none }}{% endif %}
+          {% else %}{{ none }}{% endif %}
+
+      # Stove on/off (Felipe table: index 9)
+      - name: pellet_status_raw
+        state: >
+          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% if raw %}
+            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {{ b[9] if b|length > 9 else none }}
+          {% else %}{{ none }}{% endif %}
+
+      # Program state (Felipe table: index 10)
+      # 0=OFF, 1=ON, 2=EXT thermostat
+      - name: pellet_program_state_raw
+        state: >
+          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% if raw %}
+            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {{ b[10] if b|length > 10 else none }}
+          {% else %}{{ none }}{% endif %}
+
+      - name: pellet_program_state
+        state: >
+          {% set v = states('sensor.pellet_program_state_raw') %}
+          {% if v == '0' %}OFF
+          {% elif v == '1' %}ON
+          {% elif v == '2' %}EXT
+          {% else %}unknown{% endif %}
+
+      # Text label shown on the stove picture card
+      - name: pellet_active_label
+        state: >
+          {% set on = states('sensor.pellet_status_raw') == '1' %}
+          {% set p = states('sensor.pellet_power_level') %}
+          {% if not on %}Off
+          {% elif p not in ['unknown','unavailable','none',''] %}Running · Power {{ p }}/5
+          {% else %}Running{% endif %}
+
+      # Auto-OFF (Felipe table: index 20)
+      - name: pellet_auto_off_raw
+        state: >
+          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% if raw %}
+            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {{ b[20] if b|length > 20 else none }}
+          {% else %}{{ none }}{% endif %}
+
+      - name: pellet_structure_temp
+        unit_of_measurement: "°C"
+        state_class: measurement
+        device_class: temperature
+        state: >
+          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% if raw %}
+            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {% if b|length > 38 and b[38] != 255 %}{{ b[38] }}{% else %}{{ none }}{% endif %}
+          {% else %}{{ none }}{% endif %}
+
+      - name: pellet_smoke_temp
+        unit_of_measurement: "°C"
+        state_class: measurement
+        device_class: temperature
+        state: >
+          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% if raw %}
+            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {# 16-bit little-endian: b[43] is the high byte (goes to 1 above 255 °C) #}
+            {% if b|length > 43 and not (b[42] == 255 and b[43] == 255) %}{{ b[43] * 256 + b[42] }}{% else %}{{ none }}{% endif %}
+          {% else %}{{ none }}{% endif %}
+
+      # Combustion air flow (raw sensor units, NOT a temperature): tracks the
+      # smoke fan (corr. 0.86), ~40 off, ~90 at power 1, ~130 at power 5,
+      # 250-350 during the ~5 min ignition blast. Was "pellet_flow_temp".
+      - name: pellet_air_flow
+        icon: mdi:weather-windy
+        state_class: measurement
+        state: >
+          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% if raw %}
+            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {# 16-bit little-endian: b[55] is the high byte (seen up to 351 °C) #}
+            {% if b|length > 55 and not (b[54] == 255 and b[55] == 255) %}{{ b[55] * 256 + b[54] }}{% else %}{{ none }}{% endif %}
+          {% else %}{{ none }}{% endif %}
+
+      - name: pellet_level_raw
+        state: >
+          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% if raw %}
+            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {% if b|length > 64 and b[64] != 255 %}{{ b[64] }}{% else %}{{ none }}{% endif %}
+          {% else %}{{ none }}{% endif %}
+
+      - name: pellet_level_bars
+        state: >
+          {% set v = states('sensor.pellet_level_raw') %}
+          {% if v not in ['unknown','unavailable','none',''] %}
+            {% set n = (v | int(0) / 8) | round(0) | int %}
+            {{ '▮' * n ~ '▯' * (5 - n) }}
+          {% else %}{{ none }}{% endif %}
+
+      - name: pellet_power_level
+        state: >
+          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% if raw %}
+            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {% if b|length > 99 and b[99] != 255 %}{{ b[99] }}{% else %}{{ none }}{% endif %}
+          {% else %}{{ none }}{% endif %}
+
+      - name: pellet_power_bars
+        state: >
+          {% set v = states('sensor.pellet_power_level') %}
+          {% if v not in ['unknown','unavailable','none',''] %}
+            {% set n = v | int(0) %}
+            {{ '▮' * n ~ '▯' * (5 - n) }}
+          {% else %}{{ none }}{% endif %}
+
+      # Felipe: speeds at 100/101/102
+      - name: pellet_motor_speed
+        state: >
+          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% if raw %}
+            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {{ b[100] if b|length > 100 else none }}
+          {% else %}{{ none }}{% endif %}
+
+      - name: pellet_convection_fan_speed
+        state: >
+          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% if raw %}
+            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {{ b[101] if b|length > 101 else none }}
+          {% else %}{{ none }}{% endif %}
+
+      - name: pellet_smoke_fan_speed
+        state: >
+          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% if raw %}
+            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {{ b[102] if b|length > 102 else none }}
+          {% else %}{{ none }}{% endif %}
+
+      # Room fan speed setting 0-5 (status byte 11; the app reads it from here too)
+      - name: pellet_fan_level
+        state: >
+          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% if raw %}
+            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {{ b[11] if b|length > 11 else none }}
+          {% else %}{{ none }}{% endif %}
+
+      # uptime (indices 5,6,7)
+      - name: pellet_uptime_raw
+        unit_of_measurement: "s"
+        state_class: measurement
+        state: >
+          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% if raw %}
+            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {% if b|length > 7 %}
+              {{ b[5] + (b[6] * 256) + (b[7] * 65536) }}
+            {% else %}{{ none }}{% endif %}
+          {% else %}{{ none }}{% endif %}
+
+      # Error code (byte 26) with readable text — code table from Felipe (HACF forum)
+      - name: pellet_error
+        icon: mdi:alert-circle-outline
+        state: >
+          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% set b = raw.split(',') | reject('equalto','') | map('int') | list if raw else [] %}
+          {% set code = b[26] if b|length > 26 else none %}
+          {% set names = {1:'Fire went out', 2:'Ignition failed', 3:'Insufficient air intake',
+              4:'Probe Tc1 fault', 5:'Probe Tc2 fault', 6:'Line sync error', 7:'EEPROM error',
+              8:'EEPROM error', 9:'Pressure sensor fault', 10:'Power cut', 16:'Power cut'} %}
+          {% if code is none %}{{ none }}
+          {% elif code == 0 %}OK
+          {% else %}E{{ code }} · {{ names.get(code, 'Unknown code') }}{% endif %}
+        attributes:
+          code: >
+            {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+            {% set b = raw.split(',') | reject('equalto','') | map('int') | list if raw else [] %}
+            {{ b[26] if b|length > 26 else none }}
+          cause: >
+            {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+            {% set b = raw.split(',') | reject('equalto','') | map('int') | list if raw else [] %}
+            {% set causes = {1:'Out of pellets, or sawdust in the hopper',
+              2:'Empty hopper, sawdust in the hopper, dirty/misplaced burn pot, or broken igniter',
+              3:'Door open, ash drawer not closed, or flue dirty/blocked',
+              4:'Probe Tc1 disconnected or broken', 5:'Probe Tc2 disconnected or broken',
+              6:'Mains line synchronisation error', 7:'Control board memory error',
+              8:'Control board memory error', 9:'Pressure sensor disconnected or broken',
+              10:'Power was cut', 16:'Power was cut'} %}
+            {% set code = b[26] if b|length > 26 else 0 %}
+            {{ causes.get(code, 'See the stove manual') if code else '' }}
+
+      # Minutes since the stove switched on (resets to now if HA restarts while burning)
+      - name: pellet_burn_time
+        unit_of_measurement: "min"
+        device_class: duration
+        icon: mdi:timer-outline
+        state: >
+          {% if is_state('binary_sensor.pellet_stove_on', 'on') %}
+            {{ ((now() - states.binary_sensor.pellet_stove_on.last_changed).total_seconds() / 60) | int }}
+          {% else %}0{% endif %}
+
+  - binary_sensor:
+      # Igniter (resistance) on/off — byte 96; on for ~2-9 min at each (re)ignition
+      - name: pellet_igniter
+        device_class: heat
+        icon: mdi:fire
+        state: >
+          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% set b = raw.split(',') | reject('equalto','') | map('int') | list if raw else [] %}
+          {{ b|length > 96 and b[96] == 1 }}
+
+      - name: pellet_stove_on
+        device_class: running
+        state: "{{ states('sensor.pellet_status_raw') == '1' }}"
+
+      # if you want "active" meaning program ON (index 10 == 1)
+      - name: pellet_stove_active
+        device_class: running
+        state: "{{ states('sensor.pellet_program_state_raw') == '1' }}"
+
+  # ---- Stove controls (via shell_command.stove_control -> /config/stove_control.py) ----
+
+automation:
+- id: stove_event_logger
+  alias: "Stove event logger"
+  description: >-
+    Every 30 s, hands the raw stove frames to /config/stove_logger.py, which
+    logs errors (with 10 min before/after), on/off, igniter and bridge
+    offline events to /config/stove_log/events.jsonl (max 10 MB).
+  mode: single
+  max_exceeded: silent
+  triggers:
+    - trigger: time_pattern
+      seconds: "/30"
+  actions:
+    - action: shell_command.stove_log
+      data:
+        f81: >-
+          {% set d = state_attr('sensor.pellet_frame_81', 'data') | string | regex_replace('[^0-9,]', '') %}
+          {{ d if d | length > 100 else 'none' }}
+        f49: >-
+          {% set d = state_attr('sensor.pellet_frame_49', 'data') | string | regex_replace('[^0-9,]', '') %}
+          {{ d if d | length > 100 else 'none' }}
+
+- id: stove_send_target_temperature
+  alias: "Stove: send target temperature"
+  description: >-
+    Sends the dashboard target temperature to the stove 2 s after the last
+    change, so several +/- presses become one command.
+  mode: restart
+  triggers:
+    - trigger: state
+      entity_id: input_number.stove_target_temperature
+      for: "00:00:02"
+  conditions:
+    - condition: template
+      value_template: >-
+        {# Only changes made by a person are sent (not the automatic display syncs).
+           No comparison with the stove sensor here: it can be stale while an earlier
+           command is still in flight. The script re-reads the stove and skips no-ops. #}
+        {{ trigger.to_state.context.user_id is not none }}
+  actions:
+    - action: shell_command.stove_control
+      data:
+        action: temp
+        value: "{{ states('input_number.stove_target_temperature') }}"
+
+- id: stove_sync_target_temperature
+  alias: "Stove: sync target temperature from stove"
+  description: >-
+    Keeps the dashboard target equal to the stove's real set point (e.g. after a
+    change on the stove's panel), but never while you are adjusting it.
+    At HA startup it syncs as soon as the stove sensor has a value.
+  mode: single
+  triggers:
+    - trigger: state
+      entity_id: sensor.pellet_set_temp
+    - trigger: time_pattern
+      minutes: "/1"
+    - trigger: homeassistant
+      event: start
+      id: start
+  conditions:
+    - condition: template
+      value_template: >-
+        {# sync unless YOU changed it in the last 60 s (automatic syncs don't block) #}
+        {{ trigger.id == 'start' or
+           states.input_number.stove_target_temperature.context.user_id is none or
+           (now() - states.input_number.stove_target_temperature.last_changed).total_seconds() > 60 }}
+  actions:
+    - wait_template: "{{ states('sensor.pellet_set_temp') | is_number }}"
+      timeout: "00:02:00"
+      continue_on_timeout: false
+    - condition: template
+      value_template: >-
+        {{ (states('sensor.pellet_set_temp') | float(0)) != (states('input_number.stove_target_temperature') | float(0)) }}
+    - action: input_number.set_value
+      target:
+        entity_id: input_number.stove_target_temperature
+      data:
+        value: "{{ states('sensor.pellet_set_temp') | float }}"
+
+- id: stove_send_fan_speed
+  alias: "Stove: send fan speed"
+  description: Sends the dashboard fan speed 2 s after the last change (several presses = one command).
+  mode: restart
+  triggers:
+    - trigger: state
+      entity_id: input_number.stove_fan_speed
+      for: "00:00:02"
+  conditions:
+    - condition: template
+      value_template: >-
+        {# Only changes made by a person are sent (not the automatic display syncs).
+           No comparison with the stove sensor here: it can be stale while an earlier
+           command is still in flight. The script re-reads the stove and skips no-ops. #}
+        {{ trigger.to_state.context.user_id is not none }}
+  actions:
+    - action: shell_command.stove_control
+      data:
+        action: fan
+        value: "{{ states('input_number.stove_fan_speed') | int }}"
+
+- id: stove_sync_fan_speed
+  alias: "Stove: sync fan speed from stove"
+  description: Keeps the dashboard fan speed equal to the stove's, but never while you are adjusting it.
+  mode: single
+  triggers:
+    - trigger: state
+      entity_id: sensor.pellet_fan_level
+    - trigger: time_pattern
+      minutes: "/1"
+    - trigger: homeassistant
+      event: start
+      id: start
+  conditions:
+    - condition: template
+      value_template: >-
+        {# sync unless YOU changed it in the last 60 s (automatic syncs don't block) #}
+        {{ trigger.id == 'start' or
+           states.input_number.stove_fan_speed.context.user_id is none or
+           (now() - states.input_number.stove_fan_speed.last_changed).total_seconds() > 60 }}
+  actions:
+    - wait_template: "{{ states('sensor.pellet_fan_level') | is_number }}"
+      timeout: "00:02:00"
+      continue_on_timeout: false
+    - condition: template
+      value_template: >-
+        {{ 1 <= (states('sensor.pellet_fan_level') | int(0)) <= 5 and
+           (states('sensor.pellet_fan_level') | int(0)) != (states('input_number.stove_fan_speed') | int(0)) }}
+    - action: input_number.set_value
+      target:
+        entity_id: input_number.stove_fan_speed
+      data:
+        value: "{{ states('sensor.pellet_fan_level') | int }}"
+
+- id: stove_send_power
+  alias: "Stove: send power on/off"
+  description: >-
+    Sends the dashboard power request 3 s after the last change (so quick
+    on/off/on taps collapse into one). The script also refuses more than one
+    power command per 2 minutes.
+  mode: restart
+  triggers:
+    - trigger: state
+      entity_id: input_boolean.stove_power
+      to: ["on", "off"]
+      for: "00:00:03"
+  conditions:
+    - condition: template
+      value_template: >-
+        {# Only changes made by a person are sent (not the automatic display syncs).
+           No comparison with the stove sensor here: it can be stale while an earlier
+           command is still in flight. The script re-reads the stove and skips no-ops. #}
+        {{ trigger.to_state.context.user_id is not none }}
+  actions:
+    - action: shell_command.stove_control
+      data:
+        action: "{{ 'on' if is_state('input_boolean.stove_power', 'on') else 'off' }}"
+
+- id: stove_sync_power
+  alias: "Stove: sync power from stove"
+  description: >-
+    Keeps the dashboard power toggle equal to the stove's real on/off state,
+    except during the 150 s after you changed it (time for the command to apply).
+  mode: single
+  triggers:
+    - trigger: state
+      entity_id: binary_sensor.pellet_stove_on
+    - trigger: time_pattern
+      minutes: "/1"
+    - trigger: homeassistant
+      event: start
+      id: start
+  conditions:
+    - condition: template
+      value_template: >-
+        {{ trigger.id == 'start' or
+           states.input_boolean.stove_power.context.user_id is none or
+           (now() - states.input_boolean.stove_power.last_changed).total_seconds() > 150 }}
+  actions:
+    - wait_template: "{{ states('binary_sensor.pellet_stove_on') in ['on', 'off'] }}"
+      timeout: "00:02:00"
+      continue_on_timeout: false
+    - condition: template
+      value_template: "{{ states('binary_sensor.pellet_stove_on') != states('input_boolean.stove_power') }}"
+    - action: "input_boolean.turn_{{ states('binary_sensor.pellet_stove_on') }}"
+      target:
+        entity_id: input_boolean.stove_power
