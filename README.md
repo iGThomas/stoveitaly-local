@@ -17,7 +17,7 @@ Tested on one stove. If yours differs, open an issue with a few `/read?byte=81` 
 |---|---|
 | Status read (temperatures, fans, pellets, igniter, errors) | works |
 | Set point, fan speed | works |
-| On/off | implemented, not tested on a real stove yet |
+| On/off | works |
 | Chrono program (weekly schedule, 3 slots/day) | layout known from the app, no writer, not tested |
 | Chrono activation (off / on / external thermostat) | byte known, not tested |
 | Auto-off | byte known, not tested |
