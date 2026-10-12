@@ -1,7 +1,7 @@
 # stoveitaly-local
 
-Local control of STOVEItaly / Vivace pellet stoves over the stove's Wi-Fi module.
-Plain HTTP on your LAN, no cloud.
+Local control of STOVEItaly (Stove Italy) / Vivace pellet stoves from Home Assistant
+or any script, over the stove's own Wi-Fi module. No cloud, no VivaceTheStove app.
 
 - [PROTOCOL.md](PROTOCOL.md): endpoints, frame layout, checksum, byte maps
 - `tools/stove_command.py`: read the stove, send commands
