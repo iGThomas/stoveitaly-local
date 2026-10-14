@@ -52,6 +52,13 @@ command_line:
         {% set a = {'temp': 'Temperature', 'fan': 'Fan', 'on': 'Power on', 'off': 'Power off'} %}
         {% if value_json.action %}{{ (a.get(value_json.action, value_json.action) ~ ' ' ~ (value_json.value or '') ~ ' → ' ~ value_json.result ~ ' (' ~ value_json.ts[11:16] ~ ')')[:250] }}{% else %}none yet{% endif %}
 
+# Optional, in configuration.yaml: the cached frame changes every 15 s and the raw
+# frame is already recorded, so it can be left out of the history database:
+# recorder:
+#   exclude:
+#     entities:
+#       - sensor.pellet_frame_81_cached
+
 # Stove event logger -> /config/stove_log/events.jsonl (capped at 10 MB)
 shell_command:
   stove_log: "python3 /config/stove_logger.py {{ f81 }} {{ f49 }}"
@@ -77,18 +84,44 @@ rest:
           - data
 
 template:
+  # Last good status frame. A single missed poll (the Wi-Fi module skips one now and
+  # then, often every ~61 min) no longer turns every stove sensor "unknown".
+  - trigger:
+      - trigger: state
+        entity_id: sensor.pellet_frame_81
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ state_attr('sensor.pellet_frame_81', 'data') is string and
+             state_attr('sensor.pellet_frame_81', 'data') | length > 100 }}
+    sensor:
+      - name: pellet_frame_81_cached
+        icon: mdi:database-clock
+        state: "{{ now().isoformat() }}"
+        attributes:
+          # stored as a list of ints (a comma string would be auto-parsed into a tuple)
+          data: "{{ state_attr('sensor.pellet_frame_81', 'data').split(',') | reject('equalto', '') | map('int') | list }}"
+
+  # Bridge counts as offline only after 60 s without an answer
+  - binary_sensor:
+      - name: pellet_bridge_online
+        device_class: connectivity
+        delay_off: "00:01:00"
+        state: "{{ states('sensor.pellet_frame_81') not in ['unknown', 'unavailable'] }}"
+
   - sensor:
       # --------------------------
       # helper: pull & parse frame 81
       # --------------------------
       - name: pellet_room_temp
+        availability: "{{ is_state('binary_sensor.pellet_bridge_online', 'on') }}"
         unit_of_measurement: "°C"
         state_class: measurement
         device_class: temperature
         state: >
-          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% set raw = state_attr('sensor.pellet_frame_81_cached','data') %}
           {% if raw %}
-            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {% set b = raw | list %}
             {# Ambient = 16-bit little-endian (b[35]*256 + b[34]) / 10 #}
             {# only 255,255 means "no value"; a single 255 is valid (e.g. 25.5 °C) #}
             {% if b|length > 35 and not (b[34] == 255 and b[35] == 255) %}
@@ -97,13 +130,14 @@ template:
           {% else %}{{ none }}{% endif %}
 
       - name: pellet_set_temp
+        availability: "{{ is_state('binary_sensor.pellet_bridge_online', 'on') }}"
         unit_of_measurement: "°C"
         state_class: measurement
         device_class: temperature
         state: >
-          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% set raw = state_attr('sensor.pellet_frame_81_cached','data') %}
           {% if raw %}
-            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {% set b = raw | list %}
             {# 16-bit little-endian ÷10 (verified: 25.7 °C = b12 1, b13 1) #}
             {% if b|length > 13 and not (b[12] == 255 and b[13] == 255) %}
               {{ ((b[13] * 256 + b[12]) / 10) | round(1) }}
@@ -112,20 +146,22 @@ template:
 
       # Stove on/off (Felipe table: index 9)
       - name: pellet_status_raw
+        availability: "{{ is_state('binary_sensor.pellet_bridge_online', 'on') }}"
         state: >
-          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% set raw = state_attr('sensor.pellet_frame_81_cached','data') %}
           {% if raw %}
-            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {% set b = raw | list %}
             {{ b[9] if b|length > 9 else none }}
           {% else %}{{ none }}{% endif %}
 
       # Program state (Felipe table: index 10)
       # 0=OFF, 1=ON, 2=EXT thermostat
       - name: pellet_program_state_raw
+        availability: "{{ is_state('binary_sensor.pellet_bridge_online', 'on') }}"
         state: >
-          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% set raw = state_attr('sensor.pellet_frame_81_cached','data') %}
           {% if raw %}
-            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {% set b = raw | list %}
             {{ b[10] if b|length > 10 else none }}
           {% else %}{{ none }}{% endif %}
 
@@ -148,32 +184,35 @@ template:
 
       # Auto-OFF (Felipe table: index 20)
       - name: pellet_auto_off_raw
+        availability: "{{ is_state('binary_sensor.pellet_bridge_online', 'on') }}"
         state: >
-          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% set raw = state_attr('sensor.pellet_frame_81_cached','data') %}
           {% if raw %}
-            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {% set b = raw | list %}
             {{ b[20] if b|length > 20 else none }}
           {% else %}{{ none }}{% endif %}
 
       - name: pellet_structure_temp
+        availability: "{{ is_state('binary_sensor.pellet_bridge_online', 'on') }}"
         unit_of_measurement: "°C"
         state_class: measurement
         device_class: temperature
         state: >
-          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% set raw = state_attr('sensor.pellet_frame_81_cached','data') %}
           {% if raw %}
-            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {% set b = raw | list %}
             {% if b|length > 38 and b[38] != 255 %}{{ b[38] }}{% else %}{{ none }}{% endif %}
           {% else %}{{ none }}{% endif %}
 
       - name: pellet_smoke_temp
+        availability: "{{ is_state('binary_sensor.pellet_bridge_online', 'on') }}"
         unit_of_measurement: "°C"
         state_class: measurement
         device_class: temperature
         state: >
-          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% set raw = state_attr('sensor.pellet_frame_81_cached','data') %}
           {% if raw %}
-            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {% set b = raw | list %}
             {# 16-bit little-endian: b[43] is the high byte (goes to 1 above 255 °C) #}
             {% if b|length > 43 and not (b[42] == 255 and b[43] == 255) %}{{ b[43] * 256 + b[42] }}{% else %}{{ none }}{% endif %}
           {% else %}{{ none }}{% endif %}
@@ -182,21 +221,23 @@ template:
       # smoke fan (corr. 0.86), ~40 off, ~90 at power 1, ~130 at power 5,
       # 250-350 during the ~5 min ignition blast. Was "pellet_flow_temp".
       - name: pellet_air_flow
+        availability: "{{ is_state('binary_sensor.pellet_bridge_online', 'on') }}"
         icon: mdi:weather-windy
         state_class: measurement
         state: >
-          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% set raw = state_attr('sensor.pellet_frame_81_cached','data') %}
           {% if raw %}
-            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {% set b = raw | list %}
             {# 16-bit little-endian: b[55] is the high byte (seen up to 351 °C) #}
             {% if b|length > 55 and not (b[54] == 255 and b[55] == 255) %}{{ b[55] * 256 + b[54] }}{% else %}{{ none }}{% endif %}
           {% else %}{{ none }}{% endif %}
 
       - name: pellet_level_raw
+        availability: "{{ is_state('binary_sensor.pellet_bridge_online', 'on') }}"
         state: >
-          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% set raw = state_attr('sensor.pellet_frame_81_cached','data') %}
           {% if raw %}
-            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {% set b = raw | list %}
             {% if b|length > 64 and b[64] != 255 %}{{ b[64] }}{% else %}{{ none }}{% endif %}
           {% else %}{{ none }}{% endif %}
 
@@ -209,10 +250,11 @@ template:
           {% else %}{{ none }}{% endif %}
 
       - name: pellet_power_level
+        availability: "{{ is_state('binary_sensor.pellet_bridge_online', 'on') }}"
         state: >
-          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% set raw = state_attr('sensor.pellet_frame_81_cached','data') %}
           {% if raw %}
-            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {% set b = raw | list %}
             {% if b|length > 99 and b[99] != 255 %}{{ b[99] }}{% else %}{{ none }}{% endif %}
           {% else %}{{ none }}{% endif %}
 
@@ -226,46 +268,51 @@ template:
 
       # Felipe: speeds at 100/101/102
       - name: pellet_motor_speed
+        availability: "{{ is_state('binary_sensor.pellet_bridge_online', 'on') }}"
         state: >
-          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% set raw = state_attr('sensor.pellet_frame_81_cached','data') %}
           {% if raw %}
-            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {% set b = raw | list %}
             {{ b[100] if b|length > 100 else none }}
           {% else %}{{ none }}{% endif %}
 
       - name: pellet_convection_fan_speed
+        availability: "{{ is_state('binary_sensor.pellet_bridge_online', 'on') }}"
         state: >
-          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% set raw = state_attr('sensor.pellet_frame_81_cached','data') %}
           {% if raw %}
-            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {% set b = raw | list %}
             {{ b[101] if b|length > 101 else none }}
           {% else %}{{ none }}{% endif %}
 
       - name: pellet_smoke_fan_speed
+        availability: "{{ is_state('binary_sensor.pellet_bridge_online', 'on') }}"
         state: >
-          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% set raw = state_attr('sensor.pellet_frame_81_cached','data') %}
           {% if raw %}
-            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {% set b = raw | list %}
             {{ b[102] if b|length > 102 else none }}
           {% else %}{{ none }}{% endif %}
 
       # Room fan speed setting 0-5 (status byte 11; the app reads it from here too)
       - name: pellet_fan_level
+        availability: "{{ is_state('binary_sensor.pellet_bridge_online', 'on') }}"
         state: >
-          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% set raw = state_attr('sensor.pellet_frame_81_cached','data') %}
           {% if raw %}
-            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {% set b = raw | list %}
             {{ b[11] if b|length > 11 else none }}
           {% else %}{{ none }}{% endif %}
 
       # uptime (indices 5,6,7)
       - name: pellet_uptime_raw
+        availability: "{{ is_state('binary_sensor.pellet_bridge_online', 'on') }}"
         unit_of_measurement: "s"
         state_class: measurement
         state: >
-          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
+          {% set raw = state_attr('sensor.pellet_frame_81_cached','data') %}
           {% if raw %}
-            {% set b = raw.split(',') | reject('equalto','') | map('int') | list %}
+            {% set b = raw | list %}
             {% if b|length > 7 %}
               {{ b[5] + (b[6] * 256) + (b[7] * 65536) }}
             {% else %}{{ none }}{% endif %}
@@ -273,10 +320,11 @@ template:
 
       # Error code (byte 26) with readable text — code table from Felipe (HACF forum)
       - name: pellet_error
+        availability: "{{ is_state('binary_sensor.pellet_bridge_online', 'on') }}"
         icon: mdi:alert-circle-outline
         state: >
-          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
-          {% set b = raw.split(',') | reject('equalto','') | map('int') | list if raw else [] %}
+          {% set raw = state_attr('sensor.pellet_frame_81_cached','data') %}
+          {% set b = raw | list if raw else [] %}
           {% set code = b[26] if b|length > 26 else none %}
           {% set names = {1:'Fire went out', 2:'Ignition failed', 3:'Insufficient air intake',
               4:'Probe Tc1 fault', 5:'Probe Tc2 fault', 6:'Line sync error', 7:'EEPROM error',
@@ -286,12 +334,12 @@ template:
           {% else %}E{{ code }} · {{ names.get(code, 'Unknown code') }}{% endif %}
         attributes:
           code: >
-            {% set raw = state_attr('sensor.pellet_frame_81','data') %}
-            {% set b = raw.split(',') | reject('equalto','') | map('int') | list if raw else [] %}
+            {% set raw = state_attr('sensor.pellet_frame_81_cached','data') %}
+            {% set b = raw | list if raw else [] %}
             {{ b[26] if b|length > 26 else none }}
           cause: >
-            {% set raw = state_attr('sensor.pellet_frame_81','data') %}
-            {% set b = raw.split(',') | reject('equalto','') | map('int') | list if raw else [] %}
+            {% set raw = state_attr('sensor.pellet_frame_81_cached','data') %}
+            {% set b = raw | list if raw else [] %}
             {% set causes = {1:'Out of pellets, or sawdust in the hopper',
               2:'Empty hopper, sawdust in the hopper, dirty/misplaced burn pot, or broken igniter',
               3:'Door open, ash drawer not closed, or flue dirty/blocked',
@@ -315,11 +363,12 @@ template:
   - binary_sensor:
       # Igniter (resistance) on/off — byte 96; on for ~2-9 min at each (re)ignition
       - name: pellet_igniter
+        availability: "{{ is_state('binary_sensor.pellet_bridge_online', 'on') }}"
         device_class: heat
         icon: mdi:fire
         state: >
-          {% set raw = state_attr('sensor.pellet_frame_81','data') %}
-          {% set b = raw.split(',') | reject('equalto','') | map('int') | list if raw else [] %}
+          {% set raw = state_attr('sensor.pellet_frame_81_cached','data') %}
+          {% set b = raw | list if raw else [] %}
           {{ b|length > 96 and b[96] == 1 }}
 
       - name: pellet_stove_on
@@ -385,6 +434,7 @@ automation:
     change on the stove's panel), but never while you are adjusting it.
     At HA startup it syncs as soon as the stove sensor has a value.
   mode: single
+  max_exceeded: silent
   triggers:
     - trigger: state
       entity_id: sensor.pellet_set_temp
@@ -438,6 +488,7 @@ automation:
   alias: "Stove: sync fan speed from stove"
   description: Keeps the dashboard fan speed equal to the stove's, but never while you are adjusting it.
   mode: single
+  max_exceeded: silent
   triggers:
     - trigger: state
       entity_id: sensor.pellet_fan_level
@@ -497,6 +548,7 @@ automation:
     Keeps the dashboard power toggle equal to the stove's real on/off state,
     except during the 150 s after you changed it (time for the command to apply).
   mode: single
+  max_exceeded: silent
   triggers:
     - trigger: state
       entity_id: binary_sensor.pellet_stove_on

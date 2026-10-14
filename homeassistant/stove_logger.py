@@ -11,7 +11,7 @@ appends one JSON line per event to stove_log/events.jsonl:
   error_cleared     error code back to 0
   stove_on/off      byte 9 changed
   igniter_on/off    byte 96 changed
-  bridge_offline    no data from the bridge
+  bridge_offline    no data from the bridge for ~60 s (2 polls in a row)
   bridge_online     data is back
 
 events.jsonl never exceeds MAX_BYTES: oldest lines are dropped first.
@@ -75,6 +75,7 @@ def decode(b):
         "air_flow": u16(b, 54),
         "pellet_level": b[64],
         "power": b[99],
+        "fan": b[11],
         "motor": b[100],
         "conv_fan": b[101],
         "smoke_fan": b[102],
@@ -154,7 +155,9 @@ def main():
         event("logger_started")
     else:
         prev = next((s["decoded"] for s in reversed(state["ring"]) if s["decoded"]), None)
-        online = b81 is not None
+        # one missed poll is normal for this Wi-Fi module; offline = 2 misses in a row (~60 s)
+        state["misses"] = 0 if b81 is not None else state.get("misses", 0) + 1
+        online = state["misses"] < 2
         if online != state["online"]:
             event("bridge_online" if online else "bridge_offline")
             state["online"] = online

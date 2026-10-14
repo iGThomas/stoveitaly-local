@@ -43,9 +43,17 @@ def crc16_modbus(data):
     return crc
 
 
-def read_settings():
-    with urllib.request.urlopen(f"http://{BRIDGE}/read?byte=49", timeout=8) as r:
-        data = json.load(r)["data"]
+def read_settings(attempts=3):
+    # the Wi-Fi module skips a request now and then; retry before giving up
+    for i in range(attempts):
+        try:
+            with urllib.request.urlopen(f"http://{BRIDGE}/read?byte=49", timeout=8) as r:
+                data = json.load(r)["data"]
+            break
+        except (OSError, ValueError, KeyError):
+            if i == attempts - 1:
+                raise
+            time.sleep(3)
     f = [int(x) for x in data.split(",") if x != ""][:171]
     if len(f) != 171 or f[0] != 49 or f[2] != 166:
         raise ValueError(f"unexpected settings frame header {f[:4]}")
@@ -84,11 +92,17 @@ def build_command(target):
     return f
 
 
-def send(frame):
+def send(frame, attempts=3):
     s = ",".join(f"{b:03d}" for b in frame)
     url = f"http://{BRIDGE}/serialflush?" + urllib.parse.urlencode({"str": s})
-    with urllib.request.urlopen(url, timeout=8) as r:
-        return r.status
+    for i in range(attempts):
+        try:
+            with urllib.request.urlopen(url, timeout=8) as r:
+                return r.status
+        except OSError:
+            if i == attempts - 1:
+                raise
+            time.sleep(3)
 
 
 def confirmed(now, target):
