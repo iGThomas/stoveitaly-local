@@ -246,7 +246,7 @@ template:
           {% set v = states('sensor.pellet_level_raw') %}
           {% if v not in ['unknown','unavailable','none',''] %}
             {% set n = (v | int(0) / 8) | round(0) | int %}
-            {{ '▮' * n ~ '▯' * (5 - n) }}
+            {{ '●' * n ~ '○' * (5 - n) }}
           {% else %}{{ none }}{% endif %}
 
       - name: pellet_power_level
@@ -263,7 +263,7 @@ template:
           {% set v = states('sensor.pellet_power_level') %}
           {% if v not in ['unknown','unavailable','none',''] %}
             {% set n = v | int(0) %}
-            {{ '▮' * n ~ '▯' * (5 - n) }}
+            {{ '●' * n ~ '○' * (5 - n) }}
           {% else %}{{ none }}{% endif %}
 
       # Felipe: speeds at 100/101/102
